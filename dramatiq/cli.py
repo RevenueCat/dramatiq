@@ -295,8 +295,10 @@ def make_logging_setup(prefix):
     def setup_logging(args, child_id, logging_pipe):
         # Redirect all output to the logging pipe so that all output goes
         # to stderr and output is serialized so there isn't any mangling.
-        sys.stdout = logging_pipe
-        sys.stderr = logging_pipe
+
+        # DON'T send all of this across multiprocessing as it can cause locking.
+        # sys.stdout = logging_pipe
+        # sys.stderr = logging_pipe
 
         level = VERBOSITY.get(args.verbose, logging.DEBUG)
         if not args.skip_logging:
