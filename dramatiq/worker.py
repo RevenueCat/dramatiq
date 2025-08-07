@@ -14,7 +14,7 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
+import asyncio
 import os
 import time
 from collections import defaultdict
@@ -28,6 +28,7 @@ from .errors import ActorNotFound, ConnectionError, RateLimitExceeded, Retry
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
 from .results.middleware import Results
+from .asyncio import get_event_loop_thread
 
 #: The number of milliseconds to wait before restarting consumers
 #: after a connection error.
@@ -84,7 +85,8 @@ class Worker:
         self.delay_prefetch = DELAY_QUEUE_PREFETCH or min(worker_threads * 1000, 65535)
 
         self.workers = []
-        self.work_queue = PriorityQueue()
+        self.tasks = []
+        self.work_queue = asyncio.Queue()
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
 
@@ -204,13 +206,13 @@ class Worker:
         consumer.start()
 
     def _add_worker(self):
-        worker = _WorkerThread(
+        worker = _AsyncWorkerThread(
             broker=self.broker,
             consumers=self.consumers,
             work_queue=self.work_queue,
             worker_timeout=self.worker_timeout
         )
-        worker.start()
+        self.tasks.append(get_event_loop_thread().loop.create_task(worker.run()))
         self.workers.append(worker)
 
 
@@ -324,8 +326,10 @@ class _ConsumerThread(Thread):
 
             else:
                 actor = self.broker.get_actor(message.actor_name)
-                self.logger.debug("Pushing message %r onto work queue.", message.message_id)
-                self.work_queue.put((actor.priority, message))
+                self.logger.debug(f"Pushing message %r onto work queue.", message.message_id)
+                async def enq():
+                    await self.work_queue.put((actor.priority, message))
+                asyncio.run_coroutine_threadsafe(enq(), get_event_loop_thread().loop)
         except ActorNotFound:
             self.logger.error(
                 "Received message for undefined actor %r. Moving it to the DLQ.",
@@ -423,7 +427,10 @@ class _ConsumerThread(Thread):
             pass
 
 
-class _WorkerThread(Thread):
+
+
+
+class _AsyncWorkerThread(Thread):
     """WorkerThreads process incoming messages off of the work queue
     on a loop.  By themselves, they don't do any sort of network IO.
 
@@ -446,8 +453,8 @@ class _WorkerThread(Thread):
         self.work_queue = work_queue
         self.timeout = worker_timeout / 1000
 
-    def run(self):
-        self.logger.debug("Running worker thread...")
+    async def run(self):
+        self.logger.debug("Running async worker thread...")
         self.running = True
         self.broker.emit_after("worker_thread_boot", self)
         while self.running:
@@ -458,15 +465,16 @@ class _WorkerThread(Thread):
                 continue
 
             try:
-                _, message = self.work_queue.get(timeout=self.timeout)
-                self.process_message(message)
+                _, message = await self.work_queue.get()
+                self.logger.debug(f"got {message}")
+                await self.process_message(message)
             except Empty:
                 continue
 
         self.broker.emit_before("worker_thread_shutdown", self)
         self.logger.debug("Worker thread stopped.")
 
-    def process_message(self, message):
+    async def process_message(self, message):
         """Process a message pulled off of the work queue then push it
         back to its associated consumer for post processing. Stuff any SkipMessage
         exception or BaseException into the message [proxy] so that it may be used
@@ -483,8 +491,10 @@ class _WorkerThread(Thread):
 
             res = None
             if not message.failed:
+                self.logger.debug(f"getting actor {message.actor_name}")
                 actor = self.broker.get_actor(message.actor_name)
-                res = actor(*message.args, **message.kwargs)
+                self.logger.debug(f"calling actor {actor}")
+                res = await actor(*message.args, **message.kwargs)
                 if res is not None \
                    and message.options.get("pipe_target") is None \
                    and not has_results_middleware(self.broker):
@@ -549,6 +559,7 @@ class _WorkerThread(Thread):
         """
         self.logger.debug("Stopping worker thread...")
         self.running = False
+
 
 
 @lru_cache(maxsize=128)

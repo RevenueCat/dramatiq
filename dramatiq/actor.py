@@ -68,7 +68,7 @@ class Actor(Generic[P, R]):
             raise ValueError(f"An actor named {actor_name!r} is already registered.")
 
         self.logger = get_logger(fn.__module__ or "_", actor_name)
-        self.fn = async_to_sync(fn) if iscoroutinefunction(fn) else fn
+        self.fn = fn
         self.broker = broker
         self.actor_name = actor_name
         self.queue_name = queue_name
@@ -169,7 +169,7 @@ class Actor(Generic[P, R]):
         message = self.message_with_options(args=args, kwargs=kwargs, **options)
         return self.broker.enqueue(message, delay=delay)
 
-    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any | R | Awaitable[R]:
+    async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any | R | Awaitable[R]:
         """Synchronously call this actor.
 
         Parameters:
@@ -182,7 +182,7 @@ class Actor(Generic[P, R]):
         try:
             self.logger.debug("Received args=%r kwargs=%r.", args, kwargs)
             start = time.perf_counter()
-            return self.fn(*args, **kwargs)
+            return await self.fn(*args, **kwargs)
         finally:
             delta = time.perf_counter() - start
             self.logger.debug("Completed after %.02fms.", delta * 1000)
