@@ -17,7 +17,7 @@
 from os import getenv
 from queue import Empty
 from random import uniform
-from time import time
+from time import sleep, time
 
 from .errors import QueueJoinTimeout
 
@@ -89,11 +89,22 @@ def join_queue(queue, timeout=None):
     Parameters:
       timeout(Optional[float])
     """
-    with queue.all_tasks_done:
+    all_tasks_done = getattr(queue, "all_tasks_done", None)
+    if all_tasks_done is not None:
+        with all_tasks_done:
+            while queue.unfinished_tasks:
+                finished_in_time = all_tasks_done.wait(timeout=timeout)
+                if not finished_in_time:
+                    raise QueueJoinTimeout("timed out after %.02f seconds" % timeout)
+    else:
+        # Under gevent's monkey-patching the queue is replaced by a
+        # gevent queue that doesn't expose the internal all_tasks_done
+        # condition, so fall back to polling unfinished_tasks.
+        deadline = timeout and time() + timeout
         while queue.unfinished_tasks:
-            finished_in_time = queue.all_tasks_done.wait(timeout=timeout)
-            if not finished_in_time:
+            if deadline and time() >= deadline:
                 raise QueueJoinTimeout("timed out after %.02f seconds" % timeout)
+            sleep(0.001)
 
 
 def join_all(joinables, timeout):
